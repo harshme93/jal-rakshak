@@ -38,7 +38,7 @@ async function geocodeCity(city) {
 
   try {
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(city + ', India')}&format=json&limit=1&bounded=0`,
+      'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(city + ', India') + '&format=json&limit=1&bounded=0',
       { headers: { 'User-Agent': 'JalRakshak/1.0' } }
     );
     const data = await res.json();
@@ -49,6 +49,33 @@ async function geocodeCity(city) {
     }
   } catch (e) {
     console.error('Geocode failed:', e);
+  }
+  return null;
+}
+
+const OVERPASS_URLS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
+async function queryOverpass(query) {
+  for (const baseUrl of OVERPASS_URLS) {
+    try {
+      const res = await fetch(baseUrl, {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(query),
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': '*/*',
+          'User-Agent': 'JalRakshak/1.0',
+        },
+      });
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (e) {
+      console.error('Overpass error at ' + baseUrl + ':', e.message);
+    }
   }
   return null;
 }
@@ -66,58 +93,50 @@ export async function POST(req) {
 
   const bounds = await geocodeCity(city);
   if (!bounds) {
-    return NextResponse.json({ error: `Could not find bounding box for "${city}". Try a major city.` }, { status: 400 });
+    return NextResponse.json({ error: 'Could not find bounding box for "' + city + '". Try a major city.' }, { status: 400 });
   }
 
-  const bbox = `${bounds.s},${bounds.w},${bounds.n},${bounds.e}`;
-  const query = `[out:json][timeout:120];(way["natural"="water"](${bbox});way["water"](${bbox});way["landuse"="reservoir"](${bbox});node["natural"="water"](${bbox});way["waterway"="river"](${bbox});way["waterway"="canal"](${bbox});way["waterway"="drain"](${bbox});way["waterway"="stream"](${bbox});relation["natural"="water"](${bbox}););out center tags;`;
+  var bbox = bounds.s + ',' + bounds.w + ',' + bounds.n + ',' + bounds.e;
+  var query = '[out:json][timeout:120];(way["natural"="water"](' + bbox + ');way["water"](' + bbox + ');way["landuse"="reservoir"](' + bbox + ');node["natural"="water"](' + bbox + ');way["waterway"="river"](' + bbox + ');way["waterway"="canal"](' + bbox + ');way["waterway"="drain"](' + bbox + ');way["waterway"="stream"](' + bbox + ');relation["natural"="water"](' + bbox + '););out center tags;';
 
-  try {
-    const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
-    const res = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
+  var data = await queryOverpass(query);
+  if (!data) {
+    return NextResponse.json({ error: 'All Overpass API mirrors failed. Try again in a minute.' }, { status: 500 });
+  }
+
+  var waterBodies = [];
+  var seen = {};
+
+  for (var i = 0; i < (data.elements || []).length; i++) {
+    var el = data.elements[i];
+    var tags = el.tags || {};
+    var name = tags.name || tags['name:en'] || '';
+    var lat = el.lat || (el.center && el.center.lat);
+    var lon = el.lon || (el.center && el.center.lon);
+
+    if (!lat || !lon) continue;
+
+    var coordKey = lat.toFixed(4) + ',' + lon.toFixed(4);
+    if (seen[coordKey]) continue;
+    seen[coordKey] = true;
+
+    var type = 'water';
+    if (tags.water) type = tags.water;
+    if (tags.waterway) type = tags.waterway;
+    if (tags.landuse === 'reservoir') type = 'reservoir';
+    if (tags.natural === 'water' && !tags.water) type = 'water';
+
+    waterBodies.push({
+      name: name || ('Unnamed ' + type),
+      latitude: Math.round(lat * 1000000) / 1000000,
+      longitude: Math.round(lon * 1000000) / 1000000,
+      type: type,
+      locality: tags['addr:suburb'] || tags['addr:district'] || '',
+      city: city.charAt(0).toUpperCase() + city.slice(1).toLowerCase(),
+      state: state || '',
+      osm_id: el.id,
     });
-
-    if (!res.ok) {
-      return NextResponse.json({ error: `Overpass API error: ${res.status}` }, { status: 500 });
-    }
-
-    const data = await res.json();
-    const waterBodies = [];
-    const seen = new Set();
-
-    for (const el of (data.elements || [])) {
-      const tags = el.tags || {};
-      const name = tags.name || tags['name:en'] || '';
-      const lat = el.lat || el.center?.lat;
-      const lon = el.lon || el.center?.lon;
-
-      if (!lat || !lon) continue;
-
-      const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      let type = 'water';
-      if (tags.water) type = tags.water;
-      if (tags.waterway) type = tags.waterway;
-      if (tags.landuse === 'reservoir') type = 'reservoir';
-      if (tags.natural === 'water' && !tags.water) type = 'water';
-
-      waterBodies.push({
-        name: name || `Unnamed ${type}`,
-        latitude: Math.round(lat * 1000000) / 1000000,
-        longitude: Math.round(lon * 1000000) / 1000000,
-        type,
-        locality: tags['addr:suburb'] || tags['addr:district'] || '',
-        city: city.charAt(0).toUpperCase() + city.slice(1).toLowerCase(),
-        state: state || '',
-        osm_id: el.id,
-      });
-    }
-
-    return NextResponse.json({ waterBodies, bounds });
-  } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
   }
+
+  return NextResponse.json({ waterBodies: waterBodies, bounds: bounds });
 }
