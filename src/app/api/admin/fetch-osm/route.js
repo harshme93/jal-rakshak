@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 
-// City bounding boxes (approximate) - add more as needed
 const CITY_BOUNDS = {
   'delhi': { s: 28.4, w: 76.8, n: 28.9, e: 77.4 },
   'mumbai': { s: 18.85, w: 72.75, n: 19.35, e: 73.05 },
@@ -34,11 +33,9 @@ const CITY_BOUNDS = {
 };
 
 async function geocodeCity(city) {
-  // Try lookup first
   const key = city.toLowerCase().trim();
   if (CITY_BOUNDS[key]) return CITY_BOUNDS[key];
 
-  // Fallback: use Nominatim to geocode and create a bounding box
   try {
     const res = await fetch(
       `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(city + ', India')}&format=json&limit=1&bounded=0`,
@@ -48,17 +45,11 @@ async function geocodeCity(city) {
     if (data.length > 0) {
       const lat = parseFloat(data[0].lat);
       const lon = parseFloat(data[0].lon);
-      return {
-        s: lat - 0.15,
-        w: lon - 0.2,
-        n: lat + 0.15,
-        e: lon + 0.2,
-      };
+      return { s: lat - 0.15, w: lon - 0.2, n: lat + 0.15, e: lon + 0.2 };
     }
   } catch (e) {
     console.error('Geocode failed:', e);
   }
-
   return null;
 }
 
@@ -70,76 +61,3 @@ export async function POST(req) {
   }
 
   if (!city) {
-    return NextResponse.json({ error: 'City name required' }, { status: 400 });
-  }
-
-  const bounds = await geocodeCity(city);
-  if (!bounds) {
-    return NextResponse.json({ error: `Could not find bounding box for "${city}". Try a major city.` }, { status: 400 });
-  }
-
-  // Query Overpass API
-  const query = `[out:json][timeout:120];(
-    way["natural"="water"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["water"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["landuse"="reservoir"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    node["natural"="water"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["waterway"="river"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["waterway"="canal"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["waterway"="drain"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    way["waterway"="stream"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-    relation["natural"="water"](${bounds.s},${bounds.w},${bounds.n},${bounds.e});
-  );out center tags;`;
-
-  try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: `data=${encodeURIComponent(query)}`,
-    });
-
-    if (!res.ok) {
-      return NextResponse.json({ error: `Overpass API error: ${res.status}` }, { status: 500 });
-    }
-
-    const data = await res.json();
-    const waterBodies = [];
-    const seen = new Set();
-
-    for (const el of (data.elements || [])) {
-      const tags = el.tags || {};
-      const name = tags.name || tags['name:en'] || '';
-      const lat = el.lat || el.center?.lat;
-      const lon = el.lon || el.center?.lon;
-
-      if (!lat || !lon) continue;
-
-      // Dedupe by rounding coords
-      const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      // Determine type
-      let type = 'water';
-      if (tags.water) type = tags.water; // lake, pond, reservoir, river, etc
-      if (tags.waterway) type = tags.waterway; // river, canal, drain, stream
-      if (tags.landuse === 'reservoir') type = 'reservoir';
-      if (tags.natural === 'water' && !tags.water) type = 'water';
-
-      waterBodies.push({
-        name: name || `Unnamed ${type}`,
-        latitude: Math.round(lat * 1000000) / 1000000,
-        longitude: Math.round(lon * 1000000) / 1000000,
-        type,
-        locality: tags['addr:suburb'] || tags['addr:district'] || '',
-        city: city.charAt(0).toUpperCase() + city.slice(1).toLowerCase(),
-        state: state || '',
-        osm_id: el.id,
-      });
-    }
-
-    return NextResponse.json({ waterBodies, bounds });
-  } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
-  }
-}
